@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'connect.sh'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'connect.sh'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck connect.sh
+
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/connect_test.sh

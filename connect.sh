@@ -140,6 +140,7 @@ pick_connection() {
 find_ec2_instances() {
     local env="$1"
     local output
+    # shellcheck disable=SC2016  # JMESPath literal, not a shell expansion
     if ! output=$(aws ec2 describe-instances \
         --profile "$AWS_PROFILE" \
         --filters \
@@ -196,7 +197,7 @@ pick_ec2_instance() {
 #                         should exit 0 silently
 resolve_ec2_row() {
     local env="$1" name_filter="$2"
-    local instances selected id name state count
+    local instances selected id name _state count
 
     instances=$(find_ec2_instances "$env") || return 1
     [[ -z "$instances" ]] && return 0
@@ -209,7 +210,7 @@ resolve_ec2_row() {
         [[ -z "$selected" ]] && return 2
     fi
 
-    IFS=$'\t' read -r id name state <<< "$selected"
+    IFS=$'\t' read -r id name _state <<< "$selected"
     # name comes from an arbitrary, untrusted EC2 Name tag — sanitize before
     # it becomes C_NAME, since C_NAME is later used unescaped as a tmux
     # session name (':' is the tmux session:window separator) and as a
