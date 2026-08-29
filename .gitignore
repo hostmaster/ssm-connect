@@ -1,0 +1,4 @@
+# Editor / tooling
+.serena/
+.claude/
+/connections.tsv

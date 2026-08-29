@@ -1,0 +1,7 @@
+# name		env	type	target	host	lport
+redis-prod	prod	redis	-	redis.example.internal	16379
+rdp-app	prod	rdp	i-0123456789abcdef0	-	55678
+rdp-app-dev	dev	rdp	i-0fedcba9876543210	-	55680
+db-app	prod	mariadb	-	db.example.rds.amazonaws.com	13306
+db-app-dev	dev	mariadb	-	db-dev.example.rds.amazonaws.com	13316
+kube-prod	prod	kubernetes	-	kube.example.internal	45443

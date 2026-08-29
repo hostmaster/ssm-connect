@@ -1,0 +1,41 @@
+# name		env	type	target	host	lport
+#
+# Columns (tab-separated):
+#   name   - unique slug for CLI selection
+#   env    - environment label (e.g. prod, dev)
+#   type   - rdp | redis | mariadb | postgres | kubernetes
+#   target - EC2 instance ID, or "-"
+#   host   - remote hostname; "-" when forwarding to the instance itself (RDP)
+#   lport  - local port to bind
+#
+# Remote port is derived from type (6379, 3389, 3306, 5432, 443).
+#
+# How target + host map to SSM (see resolve_instance / CMD build in connect.sh):
+#
+#   target=i-…  host=-     → start-session --target i-…
+#                            AWS-StartPortForwardingSession (local → instance:3389 etc.)
+#                            Used for RDP boxes reached directly by instance ID.
+#
+#   target=-    host=…     → start-session --target <jump-host-id>
+#                            AWS-StartPortForwardingSessionToRemoteHost (local → host:port)
+#                            Jump host: EC2 Name tag from JUMP_HOST_TAG_TEMPLATE
+#                            (e.g. acme-{env}-{region}-jmp → acme-prod-us-east-1-jmp)
+#                            Used for RDS, Redis, EKS API, etc.
+#
+#   (no TSV row)            → ./connect.sh prod web-01
+#                            EC2 lookup: tag Environment=prod, Name tag web-01
+#                            Direct SSM shell, no port forwarding (ec2-shell).
+#
+# RDS hostname prefix (identifier before the cluster hash — must match AWS exactly):
+#   prod:  {org}-prod-{service}      e.g. acme-prod-main, acme-prod-second
+#   dev:   {org}-dev-{service}   e.g. acme-dev-main, acme-dev-second
+#
+redis-prod	prod	redis	-	master.acme-prod-redis-main.abc123.use1.cache.amazonaws.com	16379
+rdp-app	prod	rdp	i-0123456789abcdef0	-	55678
+rdp-app-dev	dev	rdp	i-0fedcba9876543210	-	55680
+mariadb-app	prod	mariadb	-	acme-prod-main.c1abcdefghijkl.us-east-1.rds.amazonaws.com	13306
+mariadb-app-dev	dev	mariadb	-	acme-dev-main.c1abcdefghijkl.us-east-1.rds.amazonaws.com	13316
+pg-app	prod	postgres	-	acme-prod-second.c1abcdefghijkl.us-east-1.rds.amazonaws.com	15432
+pg-app-dev	dev	postgres	-	acme-dev-second.c1abcdefghijkl.us-east-1.rds.amazonaws.com	15532
+kube-prod	prod	kubernetes	-	ABC123DEF456.gr7.us-east-1.eks.amazonaws.com	45443
+kube-dev	dev	kubernetes	-	DEF456ABC123.gr7.us-east-1.eks.amazonaws.com	45446
