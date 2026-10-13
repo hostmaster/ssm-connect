@@ -63,6 +63,29 @@ check_deps() {
     fi
 }
 
+# Allowlisted identifier for env/name (and similar path/tmux/filter Values=).
+# Same charset used when sanitizing EC2 Name tags in resolve_ec2_row.
+is_safe_slug() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+sanitize_slug() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# "-" (no remote host) or hostname/DNS/IPv4 — rejects commas, spaces, quotes
+# that would break AWS --parameters host=… CSV form.
+is_safe_host() {
+    [[ "$1" == "-" ]] && return 0
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]
+}
+
+# "-" (jump-host template path) or an EC2 instance id.
+is_safe_target() {
+    [[ "$1" == "-" ]] && return 0
+    [[ "$1" =~ ^i-[0-9a-f]+$ ]]
+}
+
 LOOP=false
 DRY_RUN=false
 TMUX_MODE=false
@@ -104,6 +127,13 @@ check_deps "${deps[@]}"
 ENV_FILTER="${POSITIONAL[0]:-}"
 NAME_FILTER="${POSITIONAL[1]:-}"
 
+# Env is interpolated into EC2 tag filters and jump-host Name tags — reject
+# anything outside the allowlisted slug charset before those call sites.
+if [[ -n "$ENV_FILTER" ]] && ! is_safe_slug "$ENV_FILTER"; then
+    echo "Error: env contains invalid characters (allowed: A-Za-z0-9._-): '${ENV_FILTER}'" >&2
+    exit 1
+fi
+
 # Prints TSV rows matching env (all rows if env is empty). Uses tab FS.
 filter_rows() {
     local env_filter="$1"
@@ -141,6 +171,10 @@ pick_connection() {
 find_ec2_instances() {
     local env="$1"
     local output
+    if ! is_safe_slug "$env"; then
+        echo "Error: env contains invalid characters (allowed: A-Za-z0-9._-): '${env}'" >&2
+        return 1
+    fi
     # shellcheck disable=SC2016  # JMESPath literal, not a shell expansion
     if ! output=$(aws ec2 describe-instances \
         --profile "$AWS_PROFILE" \
@@ -217,7 +251,7 @@ resolve_ec2_row() {
     # session name (':' is the tmux session:window separator) and as a
     # STATE_DIR marker filename component ('/' would create a bogus path).
     local safe_name
-    safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+    safe_name=$(sanitize_slug "$name")
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$safe_name" "$env" "ec2-shell" "$id" "-" "-"
 }
 
@@ -293,6 +327,26 @@ IFS=$'\t' read -r C_NAME C_ENV C_TYPE C_TARGET C_HOST C_LPORT <<< "$ROW"
 
 if [[ -z "$C_NAME" || -z "$C_ENV" || -z "$C_TYPE" || -z "$C_TARGET" || -z "$C_HOST" || -z "$C_LPORT" ]]; then
     echo "Error: malformed row in connections.tsv (missing fields): $ROW" >&2
+    exit 1
+fi
+
+# TSV name/env feed tmux session names and STATE_DIR paths; reject rather than
+# silently rewrite so operators fix the inventory. (EC2 Name tags are sanitized
+# earlier in resolve_ec2_row — those are untrusted AWS data, not local config.)
+if ! is_safe_slug "$C_NAME"; then
+    echo "Error: connection name contains invalid characters (allowed: A-Za-z0-9._-): '${C_NAME}'" >&2
+    exit 1
+fi
+if ! is_safe_slug "$C_ENV"; then
+    echo "Error: connection env contains invalid characters (allowed: A-Za-z0-9._-): '${C_ENV}'" >&2
+    exit 1
+fi
+if ! is_safe_target "$C_TARGET"; then
+    echo "Error: connection target must be '-' or an instance id (i-[0-9a-f]+): '${C_TARGET}'" >&2
+    exit 1
+fi
+if ! is_safe_host "$C_HOST"; then
+    echo "Error: connection host contains invalid characters (hostname/DNS/IP or '-'): '${C_HOST}'" >&2
     exit 1
 fi
 
@@ -392,16 +446,38 @@ wait_for_kube_tunnel() {
     return 1
 }
 
+# Builds and allowlists the jump-host EC2 Name tag for env (JUMP_HOST_TAG_TEMPLATE).
+# The expanded tag is interpolated into Values= filters — reject commas/spaces/etc.
+jump_host_tag_for_env() {
+    local env="$1"
+    if ! is_safe_slug "$env"; then
+        echo "Error: env contains invalid characters (allowed: A-Za-z0-9._-): '${env}'" >&2
+        exit 1
+    fi
+    local tag="${JUMP_HOST_TAG_TEMPLATE//\{env\}/$env}"
+    tag="${tag//\{region\}/$REGION}"
+    if ! is_safe_slug "$tag"; then
+        echo "Error: jump-host Name tag contains invalid characters (allowed: A-Za-z0-9._-): '${tag}'" >&2
+        echo "  (from JUMP_HOST_TAG_TEMPLATE='${JUMP_HOST_TAG_TEMPLATE}')" >&2
+        exit 1
+    fi
+    printf '%s\n' "$tag"
+}
+
 # Returns EC2 instance ID. If target starts with i-, returns it directly.
 # Otherwise looks up jump host by EC2 Name tag (JUMP_HOST_TAG_TEMPLATE).
 resolve_instance() {
     local target="$1" env="$2"
     if [[ "$target" == i-* ]]; then
+        if ! is_safe_target "$target"; then
+            echo "Error: connection target must be '-' or an instance id (i-[0-9a-f]+): '${target}'" >&2
+            exit 1
+        fi
         echo "$target"
         return
     fi
-    local tag="${JUMP_HOST_TAG_TEMPLATE//\{env\}/$env}"
-    tag="${tag//\{region\}/$REGION}"
+    local tag
+    tag=$(jump_host_tag_for_env "$env")
     local id
     id=$(aws ec2 describe-instances \
         --profile "$AWS_PROFILE" \
@@ -455,6 +531,8 @@ check_ssm_ping_status() {
 check_deps aws
 
 if [[ "$DRY_RUN" == true && "$C_TARGET" != i-* ]]; then
+    # Still allowlist the expanded jump-host tag (skipped AWS lookup on dry-run).
+    jump_host_tag_for_env "$C_ENV" >/dev/null
     INSTANCE_ID="<jump-host-id>"
 else
     INSTANCE_ID=$(resolve_instance "$C_TARGET" "$C_ENV")
