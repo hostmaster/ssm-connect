@@ -247,7 +247,7 @@ test_ec2_fallback_multi_match_uses_interactive_picker() {
 
 test_ec2_fallback_reachable_when_env_has_no_tsv_rows() {
     local output status
-    output=$(AWS_PROFILE=test-profile MOCK_EC2_INSTANCES=$'i-0zzz999\tweb-99\trunning' \
+    output=$(AWS_PROFILE=test-profile MOCK_EC2_INSTANCES=$'i-0abc999def\tweb-99\trunning' \
         "$SCRIPT" staging web-99 --dry-run 2>&1)
     status=$?
     if (( status != 0 )); then
@@ -255,7 +255,7 @@ test_ec2_fallback_reachable_when_env_has_no_tsv_rows() {
         echo "$output" >&2
         return 1
     fi
-    assert_contains "$output" "aws ssm start-session --profile test-profile --target i-0zzz999 --region us-east-1"
+    assert_contains "$output" "aws ssm start-session --profile test-profile --target i-0abc999def --region us-east-1"
 }
 
 test_ec2_fallback_aws_failure_is_not_misreported_as_not_found() {
@@ -308,7 +308,7 @@ test_kube_tmux_readiness_timeout_kills_session() (
     fixture_dir="${test_tmp_dir}/fixture"
     mkdir "$fixture_dir" || return 1
     ln -s "$SCRIPT" "${fixture_dir}/connect.sh" || return 1
-    printf 'fake-kube\tprod\tkubernetes\ti-fakejump0000\tfake.invalid.example\t59999\n' \
+    printf 'fake-kube\tprod\tkubernetes\ti-0abcdef0123456789\tfake.invalid.example\t59999\n' \
         > "${fixture_dir}/connections.tsv"
 
     output=$(HEALTH_STARTUP_TIMEOUT=1 SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
@@ -359,6 +359,177 @@ test_ping_status_skipped_on_dry_run() {
     assert_contains "$output" "aws ssm start-session"
 }
 
+test_rejects_tsv_name_with_path_chars() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'evil/name\tprod\tredis\t-\tredis.example.internal\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" prod 'evil/name' --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection name contains invalid characters"
+)
+
+test_rejects_tsv_name_with_tmux_separator() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'evil:name\tprod\tredis\t-\tredis.example.internal\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" prod 'evil:name' --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection name contains invalid characters"
+)
+
+test_rejects_tsv_env_with_invalid_chars() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    # Positional env must pass first; filter by empty env picker path via exact name
+    # match against a row whose env column is hostile — invoke with that env after
+    # allowlisting the positional would fail, so use a safe positional that still
+    # selects the bad row is impossible. Instead: empty ENV_FILTER + fzf picks the row.
+    printf 'bad-env-row\tprod,extra\tredis\t-\tredis.example.internal\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection env contains invalid characters"
+)
+
+test_rejects_cli_env_with_invalid_chars() {
+    local output status
+    output=$("$SCRIPT" 'prod,extra' redis-prod --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "env contains invalid characters"
+}
+
+test_rejects_tsv_host_with_parameter_injection() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'inject-host\tprod\tredis\t-\thost.example,portNumber=1\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" prod inject-host --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection host contains invalid characters"
+)
+
+test_rejects_tsv_host_with_spaces() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'spaced-host\tprod\tredis\t-\thost with spaces\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" prod spaced-host --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection host contains invalid characters"
+)
+
+test_rejects_tsv_invalid_target() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'bad-target\tprod\trdp\ti_notanid\t-\t55678\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        "$SCRIPT" prod bad-target --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "connection target must be"
+)
+
+test_rejects_unsafe_jump_host_tag_template() (
+    local test_tmp_dir fixture_dir output status
+    test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssm-connect-test.XXXXXX") || return 1
+    trap 'rm -rf "$test_tmp_dir"' EXIT
+    fixture_dir="${test_tmp_dir}/fixture"
+    mkdir "$fixture_dir" || return 1
+    printf 'jmp-row\tprod\tredis\t-\tredis.example.internal\t16001\n' \
+        > "${fixture_dir}/connections.tsv"
+
+    output=$(SSM_CONNECT_CONFIG="${fixture_dir}/connections.tsv" \
+        JUMP_HOST_TAG_TEMPLATE='jump,{env},extra' \
+        "$SCRIPT" prod jmp-row --dry-run 2>&1)
+    status=$?
+    if (( status == 0 )); then
+        echo "expected non-zero exit, got 0" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    assert_contains "$output" "jump-host Name tag contains invalid characters"
+)
+
+test_ec2_fallback_sanitizes_name_for_tmux_session() {
+    local output status
+    output=$(AWS_PROFILE=test-profile MOCK_EC2_INSTANCES=$'i-0abc123\tweb:01/prod\trunning' \
+        "$SCRIPT" prod 'web:01' --tmux 2>&1)
+    status=$?
+    if (( status != 0 )); then
+        echo "expected exit status 0, got $status" >&2
+        echo "$output" >&2
+        return 1
+    fi
+    # ':' and '/' from the EC2 Name tag must become '_' in the tmux session name
+    assert_contains "$output" "session=ssm-prod-web_01_prod"
+}
+
 run_test() {
     local name="$1"
     if "$name"; then
@@ -386,6 +557,15 @@ run_test test_kube_tmux_readiness_timeout_kills_session
 run_test test_ping_status_blocks_non_online_instance
 run_test test_ping_status_check_failure_warns_and_proceeds
 run_test test_ping_status_skipped_on_dry_run
+run_test test_rejects_tsv_name_with_path_chars
+run_test test_rejects_tsv_name_with_tmux_separator
+run_test test_rejects_tsv_env_with_invalid_chars
+run_test test_rejects_cli_env_with_invalid_chars
+run_test test_rejects_tsv_host_with_parameter_injection
+run_test test_rejects_tsv_host_with_spaces
+run_test test_rejects_tsv_invalid_target
+run_test test_rejects_unsafe_jump_host_tag_template
+run_test test_ec2_fallback_sanitizes_name_for_tmux_session
 
 if (( failures > 0 )); then
     echo "$failures test(s) failed" >&2
